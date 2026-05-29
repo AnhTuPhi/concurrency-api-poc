@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Concurrency Patterns POC</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #222; }
+  h1 { margin: 0 0 4px; }
+  .sub { color: #666; margin-bottom: 24px; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; background: #fff; }
+  .card h2 { margin: 0 0 4px; font-size: 18px; }
+  .card .desc { color: #666; font-size: 13px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { padding: 6px 14px; border: 1px solid #888; background: #f7f7f7; border-radius: 4px; cursor: pointer; font: inherit; }
+  button:hover { background: #eee; }
+  button.primary { background: #2b6cb0; color: #fff; border-color: #2b6cb0; }
+  button.danger { background: #c53030; color: #fff; border-color: #c53030; }
+  input[type=text], input[type=number] { padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+  .log { background: #1e1e1e; color: #d4d4d4; font-family: ui-monospace, monospace; font-size: 12px; padding: 10px; border-radius: 4px; height: 140px; overflow-y: auto; margin-top: 8px; }
+  .log .ok { color: #6fbf73; }
+  .log .err { color: #f08080; }
+  .log .meta { color: #888; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .badge.closed { background: #c6f6d5; color: #22543d; }
+  .badge.open   { background: #fed7d7; color: #742a2a; }
+  .badge.half   { background: #fefcbf; color: #744210; }
+  .stat { display: inline-block; padding: 3px 8px; background: #edf2f7; border-radius: 4px; font-size: 12px; margin-right: 6px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>Concurrency Patterns POC</h1>
+<div class="sub">Java 21 + Spring Boot + virtual threads. Spam the buttons and watch what each pattern does.</div>
+
+<!-- ============ RATE LIMITING ============ -->
+<div class="card">
+  <h2>1. Rate Limiting</h2>
+  <div class="desc">
+    <b>Token bucket</b> (capacity 5, refill 2/sec): allows bursts of 5, then sustains 2/sec.<br>
+    <b>Sliding window</b> (5 req / 1 sec): strict — never more than 5 in any 1-second window.
+  </div>
+  <div class="grid2">
+    <div>
+      <div class="row">
+        <button class="primary" onclick="spam('/api/rate-limit/token-bucket', 'bucketLog', 20, 50)">Spam 20× token-bucket</button>
+        <button onclick="document.getElementById('bucketLog').innerHTML=''">Clear</button>
+      </div>
+      <div class="log" id="bucketLog"></div>
+    </div>
+    <div>
+      <div class="row">
+        <button class="primary" onclick="spam('/api/rate-limit/sliding-window', 'windowLog', 20, 50)">Spam 20× sliding-window</button>
+        <button onclick="document.getElementById('windowLog').innerHTML=''">Clear</button>
+      </div>
+      <div class="log" id="windowLog"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ DEBOUNCE / THROTTLE ============ -->
+<div class="card">
+  <h2>2. Debounce &amp; Throttle</h2>
+  <div class="desc">
+    <b>Debounce</b> (400ms quiet): fires once, 400ms after you stop typing.<br>
+    <b>Throttle</b> (1000ms): fires at most once per second; extra clicks are dropped.
+  </div>
+  <div class="grid2">
+    <div>
+      <div class="row">
+        <input type="text" id="debounceInput" placeholder="Type fast…" oninput="onDebounceInput()" style="flex:1">
+        <button onclick="resetDebounceThrottle()">Reset</button>
+      </div>
+      <div class="log" id="debounceLog"></div>
+    </div>
+    <div>
+      <div class="row">
+        <button class="primary" onclick="throttleClick()">Spam-click me</button>
+        <span class="stat" id="throttleStat">clicks: 0 / fired: 0</span>
+      </div>
+      <div class="log" id="throttleLog"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ WORKER POOL ============ -->
+<div class="card">
+  <h2>3. Worker Pool / Job Queue</h2>
+  <div class="desc">
+    3 workers (virtual threads) + bounded queue of capacity 10.
+    Submit 30 jobs at once — the first 13 are accepted (3 running + 10 queued),
+    the rest get <code>503</code> backpressure.
+  </div>
+  <div class="row">
+    <button class="primary" onclick="submitJobs(30)">Submit 30 jobs</button>
+    <button onclick="submitJobs(5)">Submit 5 jobs</button>
+    <span class="stat" id="poolStat">stats…</span>
+  </div>
+  <div class="log" id="poolLog"></div>
+</div>
+
+<!-- ============ CIRCUIT BREAKER + RETRY ============ -->
+<div class="card">
+  <h2>4. Circuit Breaker &amp; Retry with Backoff</h2>
+  <div class="desc">
+    A flaky downstream fails X% of calls. Compare: raw vs. circuit-breaker (trips after 3 fails, 5s cooldown)
+    vs. retry (4 attempts, exponential backoff + jitter).
+  </div>
+  <div class="row">
+    Flaky failure rate:
+    <input type="number" id="flakyRate" value="70" min="0" max="100" style="width:60px">%
+    <button onclick="setFlaky()">Apply</button>
+    <span class="stat">Breaker:</span> <span class="badge closed" id="breakerBadge">CLOSED</span>
+  </div>
+  <div class="grid2" style="margin-top:8px">
+    <div>
+      <div class="row">
+        <button onclick="hit('/api/resilience/raw', 'rawLog')">Raw call</button>
+        <button class="primary" onclick="hit('/api/resilience/circuit-breaker', 'breakerLog')">Via circuit breaker</button>
+      </div>
+      <div class="log" id="breakerLog"></div>
+    </div>
+    <div>
+      <div class="row">
+        <button class="primary" onclick="hit('/api/resilience/retry', 'retryLog')">Via retry</button>
+        <button onclick="document.getElementById('retryLog').innerHTML=''">Clear</button>
+      </div>
+      <div class="log" id="retryLog"></div>
+    </div>
+  </div>
+  <div class="log" id="rawLog" style="margin-top:8px"></div>
+</div>
+
+<script>
+function logLine(el, text, cls='') {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = `[${new Date().toLocaleTimeString()}.${String(Date.now()%1000).padStart(3,'0')}] ${text}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function spam(url, logId, count, gapMs) {
+  const log = document.getElementById(logId);
+  log.innerHTML = '';
+  let allowed = 0, denied = 0;
+  for (let i = 0; i < count; i++) {
+    fetch(url, {method:'POST'})
+      .then(r => r.json().then(j => ({status: r.status, body: j})))
+      .then(({status, body}) => {
+        if (status === 200) { allowed++; logLine(log, `#${i+1} ALLOWED  avail=${body.snapshot.available ?? body.snapshot.used}`, 'ok'); }
+        else                 { denied++;  logLine(log, `#${i+1} 429 RATE-LIMITED`, 'err'); }
+        logLine(log, `→ allowed=${allowed} denied=${denied}`, 'meta');
+      });
+    await sleep(gapMs);
+  }
+}
+
+async function hit(url, logId) {
+  const log = document.getElementById(logId);
+  const t0 = performance.now();
+  const r = await fetch(url, {method:'POST'});
+  const dt = (performance.now() - t0).toFixed(0);
+  const j = await r.json();
+  const cls = j.ok ? 'ok' : 'err';
+  let line = `${r.status} ${dt}ms — ${JSON.stringify(j)}`;
+  logLine(log, line, cls);
+  refreshBreaker();
+}
+
+async function refreshBreaker() {
+  const r = await fetch('/api/resilience/breaker-state');
+  const j = await r.json();
+  const b = document.getElementById('breakerBadge');
+  b.textContent = j.state;
+  b.className = 'badge ' + (j.state === 'CLOSED' ? 'closed' : j.state === 'OPEN' ? 'open' : 'half');
+}
+setInterval(refreshBreaker, 1000);
+
+async function setFlaky() {
+  const pct = document.getElementById('flakyRate').value;
+  await fetch('/api/resilience/flaky?failureRatePct=' + pct, {method:'POST'});
+}
+
+// Debounce — client-side keystrokes, server-side debouncer
+async function onDebounceInput() {
+  const v = document.getElementById('debounceInput').value;
+  const r = await fetch('/api/debounce-throttle/debounce?value=' + encodeURIComponent(v), {method:'POST'});
+  const j = await r.json();
+  const log = document.getElementById('debounceLog');
+  log.innerHTML = '';
+  logLine(log, `keystrokes sent: latest="${v}"`, 'meta');
+  j.fires.forEach(f => logLine(log, 'fired: ' + f, 'ok'));
+}
+
+let throttleClicks = 0, throttleFires = 0;
+async function throttleClick() {
+  throttleClicks++;
+  const r = await fetch('/api/debounce-throttle/throttle', {method:'POST'});
+  const j = await r.json();
+  if (j.fired) throttleFires++;
+  document.getElementById('throttleStat').textContent = `clicks: ${throttleClicks} / fired: ${throttleFires}`;
+  const log = document.getElementById('throttleLog');
+  logLine(log, j.fired ? 'FIRED' : 'dropped', j.fired ? 'ok' : 'meta');
+}
+
+async function resetDebounceThrottle() {
+  await fetch('/api/debounce-throttle/reset', {method:'POST'});
+  throttleClicks = 0; throttleFires = 0;
+  document.getElementById('throttleStat').textContent = 'clicks: 0 / fired: 0';
+  document.getElementById('debounceLog').innerHTML = '';
+  document.getElementById('throttleLog').innerHTML = '';
+  document.getElementById('debounceInput').value = '';
+}
+
+// Worker pool
+async function submitJobs(n) {
+  const log = document.getElementById('poolLog');
+  let accepted = 0, rejected = 0;
+  for (let i = 0; i < n; i++) {
+    fetch('/api/workers/jobs?workMs=1500', {method:'POST'})
+      .then(r => r.json().then(j => ({status:r.status, body:j})))
+      .then(({status, body}) => {
+        if (status === 200) { accepted++; logLine(log, `#${i+1} accepted ${body.jobId}`, 'ok'); }
+        else                 { rejected++; logLine(log, `#${i+1} REJECTED — ${body.reason}`, 'err'); }
+      });
+  }
+}
+
+async function refreshPool() {
+  const r = await fetch('/api/workers/stats');
+  const s = await r.json();
+  document.getElementById('poolStat').textContent =
+    `workers=${s.workers}  queueDepth=${s.queueDepth}/${s.queueCapacity}  running=${s.running}  done=${s.done}`;
+}
+setInterval(refreshPool, 500);
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+</script>
+
+</body>
+</html>

@@ -1,0 +1,11 @@
+server:
+  port: 8081
+
+spring:
+  threads:
+    virtual:
+      enabled: true
+
+logging:
+  level:
+    com.poc.concurrency: INFO
