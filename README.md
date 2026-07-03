@@ -2,6 +2,27 @@
 
 Java 21 + Spring Boot. Four patterns in one runnable app, each with a live demo button.
 
+## Documentation map
+
+| Doc | What it answers |
+|---|---|
+| [ISSUE.md](ISSUE.md) | *Why* — the problem being solved: keeping an API alive under concurrent load and flaky dependencies, what we're protecting, scope & non-goals. |
+| [TECHNICAL.md](TECHNICAL.md) | *How* — per POC: the hard problem, what it protects, solution shape, key tech **by responsibility**, how it solves each sub-problem, and tech debt to acknowledge. |
+| [CONSISTENCY.md](CONSISTENCY.md) | *At scale* — what breaks when you run many pods / VMs behind a load balancer, and how to fix each pattern (Redis, broker, gateway, service mesh). |
+| [`/`](src/main/resources/static/index.html) | Interactive demo — spam each pattern and watch it react. |
+| [`/explain.html`](src/main/resources/static/explain.html) | Visual explainer — diagrams of the flow & key tech of each pattern and the scaling story. |
+
+## The hard problem in each POC
+
+Each pattern answers one way an unprotected API tips over (see [ISSUE.md](ISSUE.md)):
+
+| POC | Failure mode it prevents | Core hard problem |
+|---|---|---|
+| **1. Rate limiting** | Overload / abusive clients | Per-client allow/deny at high concurrency without a global lock; two definitions of "too many" (burst-tolerant vs. strict cap). |
+| **2. Debounce / throttle** | Redundant work | Collapse a flood of rapid events into the right amount of work without losing the latest intent. |
+| **3. Worker pool + queue** | Unbounded buffering (OOM) | Absorb bursts with bounded resources and shed excess **fast** instead of buffering forever. |
+| **4. Circuit breaker + retry** | Cascading failure | Stop hammering a dead downstream (breaker) and recover from transient blips without a synchronized stampede (retry + jitter). |
+
 | Pattern | Where | Idea |
 |---|---|---|
 | **Token bucket** rate limiter | `ratelimit/TokenBucketRateLimiter.java` | Refill steadily, allow bursts up to capacity |
@@ -15,11 +36,11 @@ Java 21 + Spring Boot. Four patterns in one runnable app, each with a live demo 
 ## Run
 
 ```bash
-cd "/Users/pat/Documents/Code/Github Personal/concurrency-poc"
-./mvnw spring-boot:run            # or: mvn spring-boot:run
+mvn spring-boot:run
 ```
 
-Open <http://localhost:8081>.
+- Interactive demo: <http://localhost:8081/>
+- Visual explainer: <http://localhost:8081/explain.html>
 
 Requirements: JDK 21 + Maven. (No `mvnw` is checked in — use system Maven, or run `mvn -N io.takari:maven:wrapper` first.)
 
@@ -60,8 +81,13 @@ Flaky downstream fails X% of calls (slider 0–100).
 
 ## Notes on production-readiness (what this POC skips)
 
-- **Distributed rate limiting**: in-memory state — won't work across multiple app instances. Use Redis (e.g. `INCR` + `EXPIRE`, or a Lua script for atomic sliding-window).
-- **Persistent jobs**: queue is in-process. Real systems use a durable broker (Postgres `SELECT ... FOR UPDATE SKIP LOCKED`, RabbitMQ, SQS, Kafka).
-- **Circuit breaker metrics**: real implementations use a rolling failure ratio (e.g. Resilience4j) — not consecutive count.
+The single biggest gap: **all state is in-process and node-local** — correct in one
+JVM, wrong-by-default across replicas. That, plus the per-pattern debts, is covered
+in depth in [TECHNICAL.md](TECHNICAL.md#the-one-debt-that-spans-all-four) and
+[CONSISTENCY.md](CONSISTENCY.md). In short:
+
+- **Distributed rate limiting**: in-memory state — the limit multiplies by replica count. Use a gateway or Redis (`INCR`+`EXPIRE`, or a Lua script for atomic sliding-window).
+- **Persistent jobs**: queue is in-process. Real systems use a durable broker (Postgres `SELECT ... FOR UPDATE SKIP LOCKED`, RabbitMQ, SQS, Kafka) + KEDA autoscaling on lag.
+- **Circuit breaker metrics**: real implementations use a rolling failure ratio (e.g. Resilience4j) — not consecutive count. Global tripping wants a service mesh (Envoy outlier detection).
 - **Backpressure across the wire**: HTTP `503 Retry-After`, gRPC flow control, Reactive Streams (`Flow.Subscription.request(n)`).
 - **Observability**: every pattern here should emit metrics (allowed/denied counter, queue depth gauge, breaker state gauge) and traces.
